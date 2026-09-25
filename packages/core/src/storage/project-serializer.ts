@@ -16,6 +16,8 @@ import { normalizeMotionCamera } from "../motion/motion-camera";
 import { normalizeMotionLights } from "../motion/motion-lights";
 import { normalizeMotionTracks } from "../motion/motion-tracking";
 import { normalizeCreationState } from "../creation";
+import { normalizeDirectorStoredFields } from "../director/normalize";
+import { migrateToDirectorV1 } from "./migrations/director-v1";
 import {
   UNIVERSAL_TRACKS_MIN_READER_VERSION,
   projectUsesUniversalTracks,
@@ -84,7 +86,8 @@ export interface ProjectFile {
   readonly project: Project;
 }
 
-export const SCHEMA_VERSION = "1.2.0";
+export const SCHEMA_VERSION = "1.3.0";
+const SUPPORTED_SOURCE_VERSIONS = new Set(["1.0.0", "1.1.0", "1.2.0", SCHEMA_VERSION]);
 
 function compareVersions(left: string, right: string): number {
   const parse = (value: string): number[] =>
@@ -107,9 +110,11 @@ function getProjectFileCompatibility(project: Project): Pick<
 > {
   const capabilities = project.capabilities ?? [];
   return {
-    minimumReaderVersion: projectUsesUniversalTracks(project)
-      ? UNIVERSAL_TRACKS_MIN_READER_VERSION
-      : project.minimumReaderVersion,
+    minimumReaderVersion: [
+      projectUsesUniversalTracks(project) ? UNIVERSAL_TRACKS_MIN_READER_VERSION : undefined,
+      project.director ? SCHEMA_VERSION : undefined,
+      project.minimumReaderVersion,
+    ].filter((value): value is string => !!value).sort(compareVersions).at(-1),
     capabilities: capabilities.length > 0 ? capabilities : undefined,
   };
 }
@@ -202,9 +207,9 @@ export function normalizeProjectGeneratedShaderFields(
 }
 
 export function normalizeProjectStoredFields(project: Project): Project {
-  return normalizeProjectGeneratedShaderFields(
+  return normalizeDirectorStoredFields(normalizeProjectGeneratedShaderFields(
     normalizeProjectCreationFields(normalizeProjectMotionFields(project)),
-  );
+  ));
 }
 
 export class ProjectSerializer {
@@ -218,7 +223,7 @@ export class ProjectSerializer {
     await this.saveMediaBlobs(project);
 
     const projectToSave: Project = {
-      ...project,
+      ...normalizeProjectStoredFields(project),
       modifiedAt: Date.now(),
     };
 
@@ -232,7 +237,7 @@ export class ProjectSerializer {
     }
 
     const restoredProject = await this.restoreMediaBlobs(project);
-    return restoredProject;
+    return normalizeProjectStoredFields(restoredProject);
   }
 
   exportToJson(project: Project): string {
@@ -248,14 +253,15 @@ export class ProjectSerializer {
     const projectFile = JSON.parse(json) as ProjectFile;
     assertReaderCompatibility(projectFile);
 
-    if (projectFile.version !== SCHEMA_VERSION) {
-      return this.migrateProject(projectFile);
-    }
-
-    const project = this.normalizeStoredFields(projectFile.project);
+    const project = this.migrateProject(projectFile);
 
     const processedItems: MediaItem[] = project.mediaLibrary.items.map(
       (item: MediaItem) => {
+        // WP1b: a path-referenced asset (storage "path" + sourcePath) is a
+        // real asset, not a missing blob.
+        if ((item as MediaItem).sourcePath) {
+          return item;
+        }
         if (!item.blob) {
           return {
             ...item,
@@ -301,6 +307,9 @@ export class ProjectSerializer {
 
       if (!projectFile.version) {
         result.errors.push("Missing version field");
+        result.valid = false;
+      } else if (!SUPPORTED_SOURCE_VERSIONS.has(projectFile.version)) {
+        result.errors.push(`Unsupported project version: ${projectFile.version}`);
         result.valid = false;
       } else if (projectFile.version !== SCHEMA_VERSION) {
         result.warnings.push(
@@ -356,7 +365,7 @@ export class ProjectSerializer {
       );
 
       for (const item of project.mediaLibrary.items) {
-        if (!item.blob && !item.thumbnailUrl) {
+        if (!item.blob && !item.thumbnailUrl && !item.sourcePath) {
           result.missingAssets!.push(item.id);
         }
       }
@@ -474,7 +483,13 @@ export class ProjectSerializer {
   }
 
   private migrateProject(projectFile: ProjectFile): Project {
-    return this.normalizeStoredFields(projectFile.project);
+    if (!SUPPORTED_SOURCE_VERSIONS.has(projectFile.version)) {
+      throw Object.assign(new Error(`Unsupported project version: ${projectFile.version}`), { code: "UNSUPPORTED_PROJECT_VERSION" });
+    }
+    const project = projectFile.version === SCHEMA_VERSION
+      ? projectFile.project
+      : migrateToDirectorV1(projectFile.project);
+    return this.normalizeStoredFields(project);
   }
 
   private normalizeStoredFields(project: Project): Project {

@@ -43,7 +43,17 @@ export interface ToolCall {
 export interface ToolError {
   readonly code: string;
   readonly message: string;
+  readonly hint?: string;
+  readonly entityId?: string;
 }
+
+export interface MutationReceipt<E = unknown> {
+  readonly id: string;
+  readonly entity: E;
+  readonly revision: number;
+}
+
+export interface ToolResultMeta { readonly actionId?: string; readonly [key: string]: unknown }
 
 export interface ToolResultImage {
   readonly dataUrl: string;
@@ -56,6 +66,7 @@ export interface ToolResult {
   readonly summary: string;
   readonly data?: unknown;
   readonly error?: ToolError;
+  readonly meta?: ToolResultMeta;
   /** Rendered image the model can SEE (e.g. render_motion_frame). */
   readonly image?: ToolResultImage;
 }

@@ -46,6 +46,8 @@ export interface ActionResult {
   readonly error?: ActionError;
   readonly warnings?: string[];
   readonly actionId?: string;
+  readonly data?: unknown;
+  readonly meta?: Record<string, unknown>;
 }
 
 // Error codes for action validation and execution
@@ -74,6 +76,8 @@ export interface ActionError {
   readonly message: string;
   readonly details?: Record<string, unknown>;
   readonly suggestion?: string; // User-friendly recovery suggestion
+  readonly hint?: string;
+  readonly entityId?: string;
 }
 
 // Validation result for action parameters
@@ -165,17 +169,23 @@ export type ClipAction =
         /** Pre-assigned ID keeps grouped placement deterministic on redo. */
         clipId?: string;
         duration?: number;
+        /**
+         * Explicit fit for the new clip. Falls back to transform.fitMode,
+         * then project.settings.defaultFitMode, then "contain".
+         */
+        fitMode?: "cover" | "contain" | "stretch";
       };
     }
-  | { type: "clip/remove"; params: { clipId: string } }
+  | { type: "clip/remove"; params: { clipId: string; ripple?: "none" | "track" | "all" } }
   | {
       type: "clip/move";
-      params: { clipId: string; startTime: number; trackId?: string };
+      params: { clipId: string; startTime: number; trackId?: string; ripple?: "none" | "track" | "all" };
     }
   | {
       type: "clip/trim";
-      params: { clipId: string; inPoint?: number; outPoint?: number };
+      params: { clipId: string; inPoint?: number; outPoint?: number; ripple?: "none" | "track" | "all" };
     }
+  | { type: "clip/closeGaps"; params: { trackId: string } }
   | { type: "clip/split"; params: { clipId: string; time: number } }
   | { type: "clip/rippleDelete"; params: { clipId: string } }
   | {
@@ -219,6 +229,12 @@ export type ClipAction =
       params: { clipId: string; playheadTime: number; trimStart: boolean };
     }
   | { type: "clip/closeGapBefore"; params: { clipId: string } }
+  /**
+   * Close every positive gap on a track in one undo step. Overlaps are
+   * left where they are (unlike track/consolidate, which also packs
+   * overlaps apart from time 0).
+   */
+  | { type: "clip/closeGaps"; params: { trackId: string } }
   | { type: "clip/setSpeed"; params: { clipId: string; speed: number } }
   | { type: "clip/setReverse"; params: { clipId: string; reversed: boolean } }
   | {

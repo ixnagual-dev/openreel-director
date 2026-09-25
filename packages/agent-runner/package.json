@@ -12,7 +12,8 @@
     ".": {
       "import": "./src/index.ts",
       "types": "./src/index.ts"
-    }
+    },
+    "./director-config": { "import": "./src/director-config.ts", "types": "./src/director-config.ts" }
   },
   "scripts": {
     "build": "tsup",

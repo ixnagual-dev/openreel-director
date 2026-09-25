@@ -21,6 +21,11 @@ export interface ProjectSettings {
   readonly frameRate: number;
   readonly sampleRate: number;
   readonly channels: number;
+  /**
+   * Default fit for clips created without an explicit fitMode.
+   * Absent means "contain" (legacy letterbox behaviour).
+   */
+  readonly defaultFitMode?: "cover" | "contain" | "stretch";
 }
 
 export interface Project {
@@ -29,6 +34,14 @@ export interface Project {
   readonly createdAt: number;
   readonly modifiedAt: number;
   readonly settings: ProjectSettings;
+  /** Semantic mutation revision. Missing values on legacy inputs normalize to 0. */
+  readonly revision?: number;
+  /** Optional portable Director extension state. */
+  readonly director?: import("../director/types").DirectorProjectState;
+  /** Semantic mutation revision. Missing values on legacy inputs normalize to 0. */
+  readonly revision?: number;
+  /** Optional portable Director extension state. */
+  readonly director?: import("../director/types").DirectorProjectState;
   readonly mediaLibrary: MediaLibrary;
   readonly timeline: Timeline;
   readonly textClips?: TextClip[];
@@ -66,6 +79,13 @@ export interface MediaItem {
   readonly filmstripThumbnails?: FilmstripThumbnail[];
   readonly isPlaceholder?: boolean;
   readonly originalUrl?: string;
+  /**
+   * How the media bytes are held. "blob" is the legacy in-project bytes;
+   * "path" is a reference to an absolute on-disk file (see sourcePath).
+   */
+  readonly storage?: "blob" | "path";
+  /** Absolute real path of the referenced file when storage === "path". */
+  readonly sourcePath?: string;
   /** File hint stored in JSON for cross-session/cross-machine asset matching */
   readonly sourceFile?: { name: string; size: number; lastModified: number; folder?: string };
   /** True while a background KieAI generation task is in progress */

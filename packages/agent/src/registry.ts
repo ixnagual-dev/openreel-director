@@ -321,6 +321,34 @@ import type {
 } from "./host";
 import type { JSONSchema, ToolDef, ToolDomain, ToolResult } from "./types";
 import {
+  AUDIO_EFFECT_SCHEMA,
+  AUTOMATION_POINTS_SCHEMA,
+  CLIP_CHROMA_KEY_SCHEMA,
+  CLIP_STABILIZATION_SCHEMA,
+  CLIP_TRANSFORM_SCHEMA,
+  COLOR_GRADING_SCHEMA,
+  EFFECT_ID_LIST_SCHEMA,
+  EFFECT_PARAMS_SCHEMA,
+  FREEZE_FRAMES_SCHEMA,
+  KEYFRAME_ENTRIES_SCHEMA,
+  KEYFRAME_VALUE_SCHEMA,
+  MARKER_UPDATES_SCHEMA,
+  SPEED_KEYFRAMES_SCHEMA,
+  SUBTITLE_STYLE_SCHEMA,
+  TEXT_CLIP_SCHEMA,
+  TEXT_CLIP_UPDATES_SCHEMA,
+} from "@openreel/core/types/clip-transform-schema";
+import {
+  EDITORIAL_TOOLS,
+  getCurrentProfile,
+  isCreationToolView,
+  isMotionToolView,
+  isToolProfile,
+  setCurrentProfile,
+  unknownProfileMessage,
+  type ToolProfile,
+} from "./tool-profiles";
+import {
   serializeEditorState,
   listMedia,
   listTracks,
@@ -423,11 +451,22 @@ function vec2FromObject(
   return { x, y };
 }
 
-function ok(summary: string, data?: unknown): ToolResult {
-  return { ok: true, summary, data };
+function ok(summary: string, data?: unknown, meta?: Record<string, unknown>): ToolResult {
+  return { ok: true, summary, data, ...(meta ? { meta } : {}) };
 }
 function fail(message: string, code = "ERROR"): ToolResult {
-  return { ok: false, summary: message, error: { code, message } };
+  const hints: Record<string, string> = {
+    NO_PROJECT: "Open a project and retry this operation.",
+    UNKNOWN_TOOL: "Use a registered tool name from the current tool catalog.",
+    UNKNOWN_ACTION: "Use an action type supported by this editor version.",
+    CLIP_NOT_FOUND: "Use a clip ID returned by add_clip in this project.",
+    TRACK_NOT_FOUND: "Use a track ID returned by add_track in this project.",
+    MEDIA_NOT_FOUND: "Import the media first, then use its returned media ID.",
+    INSUFFICIENT_HANDLES: "Place the clips adjacent or within two frames, then retry the transition.",
+    INVALID_PARAMS: "Correct the supplied parameters and retry.",
+    UNSUPPORTED: "Use a host with this capability configured.",
+  };
+  return { ok: false, summary: message, error: { code, message, hint: hints[code] ?? "Inspect the parameters and project state, then retry." } };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -1963,11 +2002,12 @@ function actionTool(spec: ActionToolSpec): RegisteredTool {
         params,
       };
       const result = await host.applyAction(action);
-      if (result.success) return ok(`${spec.name} applied`, { actionId: action.id });
-      return fail(
+      if (result.success) return { ok: true, summary: `${spec.name} applied`, data: result.data, meta: { actionId: action.id } };
+      const failure = fail(
         result.error?.message ?? `${spec.name} failed`,
         result.error?.code ?? "ACTION_FAILED",
       );
+      return result.error?.hint ? { ...failure, error: { ...failure.error!, hint: result.error.hint, ...(result.error.entityId ? { entityId: result.error.entityId } : {}) } } : failure;
     },
   };
 }
@@ -15406,7 +15446,7 @@ const TOOLS: RegisteredTool[] = [
     domain: "project",
     title: "Create project",
     description: "Create a new blank project and make it active. Call this first when starting from scratch. Defaults to 1920x1080 at 30fps.",
-    inputSchema: obj({ name: str, width: num, height: num, frameRate: num }),
+    inputSchema: obj({ name: str, width: num, height: num, frameRate: num, defaultFitMode: { type: "string", enum: ["cover", "contain", "stretch"] } }),
     readOnly: false,
     destructive: false,
     expensive: false,
@@ -15414,11 +15454,18 @@ const TOOLS: RegisteredTool[] = [
       if (typeof host.createProject !== "function") {
         return fail("create_project is not available in this host", "UNSUPPORTED");
       }
+      const defaultFitMode =
+        args.defaultFitMode === "cover" ||
+        args.defaultFitMode === "contain" ||
+        args.defaultFitMode === "stretch"
+          ? args.defaultFitMode
+          : undefined;
       const ref = await host.createProject({
         name: typeof args.name === "string" ? args.name : undefined,
         width: typeof args.width === "number" ? args.width : undefined,
         height: typeof args.height === "number" ? args.height : undefined,
         frameRate: typeof args.frameRate === "number" ? args.frameRate : undefined,
+        ...(defaultFitMode ? { defaultFitMode } : {}),
       });
       return ok(`Created project "${ref.name}" (${ref.width}x${ref.height} @ ${ref.frameRate}fps)`, ref);
     },
@@ -15474,7 +15521,7 @@ const TOOLS: RegisteredTool[] = [
       return ok(`Saved project "${ref.name}"`, ref);
     },
   },
-  actionTool({ name: "update_project_settings", domain: "project", actionType: "project/updateSettings", title: "Update settings", description: "Update resolution/fps/etc.", inputSchema: obj({ width: num, height: num, frameRate: num }) }),
+  actionTool({ name: "update_project_settings", domain: "project", actionType: "project/updateSettings", title: "Update settings", description: "Update resolution/fps/default fit mode (defaultFitMode: cover fills the frame, contain letterboxes, stretch distorts).", inputSchema: obj({ width: num, height: num, frameRate: num, defaultFitMode: { type: "string", enum: ["cover", "contain", "stretch"] } }) }),
   actionTool({ name: "rename_project", domain: "project", actionType: "project/rename", title: "Rename project", description: "Rename the project.", inputSchema: obj({ name: str }, ["name"]) }),
   actionTool({ name: "set_canvas_background", domain: "project", actionType: "project/setCanvasBackground", title: "Canvas background", description: "Set background fill mode/color.", inputSchema: obj({ backgroundFillMode: str, layoutBackgroundColor: str }) }),
 
@@ -15511,14 +15558,129 @@ const TOOLS: RegisteredTool[] = [
       return ok(`Imported ${ref.type} "${ref.name}" (${ref.durationSec.toFixed(2)}s)`, ref);
     },
   },
+  {
+    name: "import_media_from_path",
+    domain: "media",
+    title: "Import media from path",
+    description: "Import a local media file by absolute path into the media library. The path must sit under a configured mcp.importRoots entry ($HOME by default); symlinks escaping the roots are rejected. Referenced in place by default (copy: false); pass copy: true to copy the bytes into the project. Returns the mediaId to use with add_clip. Requires an open project.",
+    inputSchema: obj({ path: str, name: str, copy: bool }, ["path"]),
+    readOnly: false,
+    destructive: false,
+    expensive: false,
+    handler: async (args, host) => {
+      if (typeof host.importMediaFromPath !== "function") {
+        return fail("import_media_from_path is not available in this host", "UNSUPPORTED");
+      }
+      host.requireOpenProject();
+      const rawPath = args.path;
+      if (typeof rawPath !== "string" || rawPath.length === 0) {
+        return fail("path is required and must be a non-empty string", "INVALID_PARAMS");
+      }
+      if (rawPath.includes("\0")) {
+        return fail("path contains an invalid character", "INVALID_PARAMS");
+      }
+      if (!rawPath.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(rawPath)) {
+        return fail(`path must be absolute (got "${rawPath}")`, "PATH_NOT_ABSOLUTE");
+      }
+      try {
+        const ref = await host.importMediaFromPath(rawPath, {
+          name: typeof args.name === "string" ? args.name : undefined,
+          copy: args.copy === true,
+        });
+        return ok(`Imported ${ref.type} "${ref.name}" (${ref.durationSec.toFixed(2)}s)`, ref);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Media import failed";
+        const code =
+          error instanceof Error && typeof (error as { code?: unknown }).code === "string"
+            ? ((error as { code?: string }).code as string)
+            : "IMPORT_FAILED";
+        return fail(message, code);
+      }
+    },
+  },
+  {
+    name: "import_media_folder",
+    domain: "media",
+    title: "Import media folder",
+    description: "Import a folder of local media files (suffix allow-list, or glob with * ? **). The folder must sit under a configured mcp.importRoots entry. At most 500 files per call (truncated: true when capped); one bad file lands in skipped and does not abort the folder. Requires an open project.",
+    inputSchema: obj({ dir: str, glob: str, recursive: bool, copy: bool }, ["dir"]),
+    readOnly: false,
+    destructive: false,
+    expensive: false,
+    handler: async (args, host) => {
+      if (typeof host.importMediaFromFolder !== "function") {
+        return fail("import_media_folder is not available in this host", "UNSUPPORTED");
+      }
+      host.requireOpenProject();
+      const dir = args.dir;
+      if (typeof dir !== "string" || dir.length === 0) {
+        return fail("dir is required and must be a non-empty string", "INVALID_PARAMS");
+      }
+      if (dir.includes("\0")) {
+        return fail("dir contains an invalid character", "INVALID_PARAMS");
+      }
+      if (!dir.startsWith("/") && !/^[A-Za-z]:[\\/]/.test(dir)) {
+        return fail(`dir must be absolute (got "${dir}")`, "PATH_NOT_ABSOLUTE");
+      }
+      const recursive = args.recursive === true;
+      if (typeof args.glob === "string" && args.glob.includes("**") && !recursive) {
+        return fail('glob "**" requires recursive: true', "INVALID_PARAMS");
+      }
+      try {
+        const result = await host.importMediaFromFolder(dir, {
+          glob: typeof args.glob === "string" ? args.glob : undefined,
+          recursive,
+          copy: args.copy === true,
+        });
+        return ok(
+          `Imported ${result.imported.length} file(s)${result.skipped.length ? `, skipped ${result.skipped.length}` : ""}${result.truncated ? " (truncated at 500)" : ""}`,
+          result,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Folder import failed";
+        const code =
+          error instanceof Error && typeof (error as { code?: unknown }).code === "string"
+            ? ((error as { code?: string }).code as string)
+            : "IMPORT_FAILED";
+        return fail(message, code);
+      }
+    },
+  },
+  {
+    name: "set_tool_profile",
+    domain: "read",
+    title: "Set tool profile",
+    description: "Set the sticky MCP tools/list catalog profile: editorial (timeline/media/audio/subtitles, ~90 tools, default), motion, creation, or all. tools/call still executes any registered tool. Does not require an open project.",
+    inputSchema: obj({ profile: { type: "string", enum: ["editorial", "motion", "creation", "all"] } }, ["profile"]),
+    readOnly: true,
+    destructive: false,
+    expensive: false,
+    handler: async (args, host) => {
+      if (!isToolProfile(args.profile)) {
+        return fail(unknownProfileMessage(args.profile), "INVALID_PARAMS");
+      }
+      if (typeof host.setToolProfile === "function") {
+        const res = await host.setToolProfile(args.profile);
+        return ok(`Tool profile set to "${res.profile}" (${res.toolCount} tools)`, res);
+      }
+      setCurrentProfile(args.profile);
+      const tools = toolsForProfile(args.profile);
+      return ok(`Tool profile set to "${args.profile}" (${tools.length} tools)`, {
+        profile: args.profile,
+        toolCount: tools.length,
+      });
+    },
+  },
+  },
   actionTool({ name: "delete_media", domain: "media", actionType: "media/delete", title: "Delete media", description: "Delete a media library item.", inputSchema: obj({ mediaId: str }, ["mediaId"]), destructive: true }),
   actionTool({ name: "rename_media", domain: "media", actionType: "media/rename", title: "Rename media", description: "Rename a media item.", inputSchema: obj({ mediaId: str, name: str }, ["mediaId", "name"]) }),
 
   // clip
-  actionTool({ name: "add_clip", domain: "clip", actionType: "clip/add", title: "Add clip", description: "Add a media clip to a track at a time.", inputSchema: obj({ trackId: str, mediaId: str, startTime: num }, ["trackId", "mediaId", "startTime"]) }),
-  actionTool({ name: "remove_clip", domain: "clip", actionType: "clip/remove", title: "Remove clip", description: "Remove a clip.", inputSchema: obj({ clipId: str }, ["clipId"]), destructive: true }),
-  actionTool({ name: "move_clip", domain: "clip", actionType: "clip/move", title: "Move clip", description: "Move a clip to a new start time / track.", inputSchema: obj({ clipId: str, startTime: num, trackId: str }, ["clipId", "startTime"]) }),
-  actionTool({ name: "trim_clip", domain: "clip", actionType: "clip/trim", title: "Trim clip", description: "Set a clip's in/out points (seconds).", inputSchema: obj({ clipId: str, inPoint: num, outPoint: num }, ["clipId"]) }),
+  actionTool({ name: "add_clip", domain: "clip", actionType: "clip/add", title: "Add clip", description: "Add a media clip to a track at a time. fitMode cover fills the frame (no bars), contain letterboxes, stretch distorts; falls back to transform.fitMode, then the project defaultFitMode.", inputSchema: obj({ trackId: str, mediaId: str, startTime: num, fitMode: { type: "string", enum: ["cover", "contain", "stretch"] } }, ["trackId", "mediaId", "startTime"]), mapParams: (args) => (args.fitMode === undefined ? args : { ...args }) }),
+  actionTool({ name: "remove_clip", domain: "clip", actionType: "clip/remove", title: "Remove clip", description: "Remove a clip with optional ripple.", inputSchema: obj({ clipId: str, ripple: { type: "string", enum: ["none", "track", "all"] } }, ["clipId"]), destructive: true }),
+  actionTool({ name: "move_clip", domain: "clip", actionType: "clip/move", title: "Move clip with optional ripple.", description: "Move a clip to a new start time / track.", inputSchema: obj({ clipId: str, startTime: num, trackId: str, ripple: { type: "string", enum: ["none", "track", "all"] } }, ["clipId", "startTime"]) }),
+  actionTool({ name: "trim_clip", domain: "clip", actionType: "clip/trim", title: "Trim clip with optional ripple.", description: "Set a clip's in/out points (seconds).", inputSchema: obj({ clipId: str, inPoint: num, outPoint: num, ripple: { type: "string", enum: ["none", "track", "all"] } }, ["clipId"]) }),
+  actionTool({ name: "close_gaps", domain: "clip", actionType: "clip/closeGaps", title: "Close track gaps", description: "Close all gaps on a track.", inputSchema: obj({ trackId: str }, ["trackId"]) }),
   actionTool({ name: "split_clip", domain: "clip", actionType: "clip/split", title: "Split clip", description: "Split a clip at a time.", inputSchema: obj({ clipId: str, time: num }, ["clipId", "time"]) }),
   actionTool({ name: "ripple_delete_clip", domain: "clip", actionType: "clip/rippleDelete", title: "Ripple delete", description: "Delete a clip and close the gap.", inputSchema: obj({ clipId: str }, ["clipId"]), destructive: true }),
   actionTool({ name: "slip_clip", domain: "clip", actionType: "clip/slip", title: "Slip clip", description: "Slip a clip's source by delta.", inputSchema: obj({ clipId: str, delta: num }, ["clipId", "delta"]) }),
@@ -15526,15 +15688,49 @@ const TOOLS: RegisteredTool[] = [
   actionTool({ name: "roll_edit", domain: "clip", actionType: "clip/roll", title: "Roll edit", description: "Roll the edit point between two clips.", inputSchema: obj({ leftClipId: str, rightClipId: str, delta: num }, ["leftClipId", "rightClipId", "delta"]) }),
   actionTool({ name: "trim_to_playhead", domain: "clip", actionType: "clip/trimToPlayhead", title: "Trim to playhead", description: "Trim a clip's start/end to a time.", inputSchema: obj({ clipId: str, playheadTime: num, trimStart: bool }, ["clipId", "playheadTime", "trimStart"]) }),
   actionTool({ name: "close_gap", domain: "clip", actionType: "clip/closeGapBefore", title: "Close gap", description: "Close the gap before a clip.", inputSchema: obj({ clipId: str }, ["clipId"]) }),
+  {
+    name: "close_gaps",
+    domain: "clip",
+    title: "Close gaps",
+    description: "Close every positive gap on a track in one undo step (slides clips left; overlaps are left alone). Returns the track's clips after the action.",
+    inputSchema: obj({ trackId: str }, ["trackId"]),
+    readOnly: false,
+    destructive: false,
+    expensive: false,
+    handler: async (args, host) => {
+      host.requireOpenProject();
+      if (typeof args.trackId !== "string" || !args.trackId) {
+        return fail("trackId is required and must be a non-empty string", "INVALID_PARAMS");
+      }
+      const action: Action = {
+        type: "clip/closeGaps",
+        id: genId(),
+        timestamp: Date.now(),
+        params: { trackId: args.trackId },
+      };
+      const result = await host.applyAction(action);
+      if (!result.success) {
+        return fail(
+          result.error?.message ?? "close_gaps failed",
+          result.error?.code ?? "ACTION_FAILED",
+        );
+      }
+      const track = host.getProject().timeline.tracks.find((t) => t.id === args.trackId);
+      return ok(`Closed gaps on track "${args.trackId}"`, {
+        trackId: args.trackId,
+        clips: (track?.clips ?? []).map((c) => ({ id: c.id, startTime: c.startTime })),
+      });
+    },
+  },
   actionTool({ name: "set_clip_speed", domain: "speed", actionType: "clip/setSpeed", title: "Set speed", description: "Set clip playback speed (recomputes duration).", inputSchema: obj({ clipId: str, speed: num }, ["clipId", "speed"]) }),
   actionTool({ name: "set_clip_reverse", domain: "speed", actionType: "clip/setReverse", title: "Reverse clip", description: "Toggle clip reverse.", inputSchema: obj({ clipId: str, reversed: bool }, ["clipId", "reversed"]) }),
   actionTool({ name: "set_clip_pitch_correction", domain: "speed", actionType: "clip/setPitchCorrection", title: "Pitch correction", description: "Toggle pitch correction on speed changes.", inputSchema: obj({ clipId: str, pitchCorrection: bool }, ["clipId", "pitchCorrection"]) }),
-  actionTool({ name: "set_speed_ramp", domain: "speed", actionType: "speed/setRampData", title: "Speed ramp", description: "Set speed keyframes / freeze frames / pitch.", inputSchema: obj({ clipId: str, keyframes: { type: "array" }, freezeFrames: { type: "array" }, pitchCorrection: bool }, ["clipId"]) }),
-  actionTool({ name: "set_clip_stabilization", domain: "speed", actionType: "clip/setStabilization", title: "Stabilization", description: "Set clip stabilization settings.", inputSchema: obj({ clipId: str, stabilization: { type: "object" } }, ["clipId"]) }),
-  actionTool({ name: "set_clip_chroma_key", domain: "speed", actionType: "clip/setChromaKey", title: "Chroma key", description: "Set green-screen / chroma-key settings.", inputSchema: obj({ clipId: str, chromaKey: { type: "object" } }, ["clipId"]) }),
+  actionTool({ name: "set_speed_ramp", domain: "speed", actionType: "speed/setRampData", title: "Speed ramp", description: "Set speed keyframes / freeze frames / pitch.", inputSchema: obj({ clipId: str, keyframes: SPEED_KEYFRAMES_SCHEMA, freezeFrames: FREEZE_FRAMES_SCHEMA, pitchCorrection: bool }, ["clipId"]) }),
+  actionTool({ name: "set_clip_stabilization", domain: "speed", actionType: "clip/setStabilization", title: "Stabilization", description: "Set clip stabilization settings.", inputSchema: obj({ clipId: str, stabilization: CLIP_STABILIZATION_SCHEMA }, ["clipId"]) }),
+  actionTool({ name: "set_clip_chroma_key", domain: "speed", actionType: "clip/setChromaKey", title: "Chroma key", description: "Set green-screen / chroma-key settings.", inputSchema: obj({ clipId: str, chromaKey: CLIP_CHROMA_KEY_SCHEMA }, ["clipId"]) }),
 
   // transform / blend
-  actionTool({ name: "set_clip_transform", domain: "transform", actionType: "transform/update", title: "Transform clip", description: "Set position/scale/rotation/opacity/crop/fitMode.", inputSchema: obj({ clipId: str, transform: { type: "object" } }, ["clipId", "transform"]) }),
+  actionTool({ name: "set_clip_transform", domain: "transform", actionType: "transform/update", title: "Transform clip", description: "Set position (offset px from center for video/image; normalized 0..1 for text/shape/svg/sticker) / scale (multiplier, 1 = 100%) / rotation (degrees clockwise) / anchor (normalized 0..1, default 0.5,0.5) / opacity (0..1) / borderRadius (px) / crop (normalized source rect; full frame x=0,y=0,width=1,height=1) / fitMode (cover|contain|stretch|none; none renders as contain). Omitted fields stay.", inputSchema: obj({ clipId: str, transform: CLIP_TRANSFORM_SCHEMA }, ["clipId", "transform"]) }),
   actionTool({ name: "set_clip_blend_mode", domain: "transform", actionType: "clip/setBlendMode", title: "Blend mode", description: "Set a clip's blend mode.", inputSchema: obj({ clipId: str, blendMode: str }, ["clipId", "blendMode"]) }),
   actionTool({ name: "set_clip_blend_opacity", domain: "transform", actionType: "clip/setBlendOpacity", title: "Blend opacity", description: "Set a clip's blend opacity (0..1).", inputSchema: obj({ clipId: str, opacity: num }, ["clipId", "opacity"]) }),
 
@@ -15546,7 +15742,7 @@ const TOOLS: RegisteredTool[] = [
     description:
       "Add a video effect to a clip. Standard effectType values include brightness, contrast, saturation, blur, sharpen, vignette, grain, temperature, tint, shadow, glow, motion-blur, radial-blur, chromatic-aberration. Set effectType to 'shader' to run a GPU shader effect from the Motion shader library (only category 'effect' shaders, e.g. the Paper Design catalog like paper-halftone-dots or paper-liquid-metal — use list_motion_shaders with category 'effect' to discover ids); for shader effects, params MUST include a valid shaderId plus optional numeric params (name/value pairs from the shader's params) and an optional numeric time. Shader effects no-op gracefully when WebGL2 is unavailable.",
     inputSchema: obj(
-      { clipId: str, effectType: str, params: { type: "object" } },
+      { clipId: str, effectType: str, params: EFFECT_PARAMS_SCHEMA },
       ["clipId", "effectType"],
     ),
     readOnly: false,
@@ -15591,20 +15787,20 @@ const TOOLS: RegisteredTool[] = [
     },
   },
   actionTool({ name: "remove_video_effect", domain: "effect", actionType: "effect/remove", title: "Remove effect", description: "Remove a clip's video effect.", inputSchema: obj({ clipId: str, effectId: str }, ["clipId", "effectId"]) }),
-  actionTool({ name: "update_video_effect", domain: "effect", actionType: "effect/update", title: "Update effect", description: "Update a video effect's params.", inputSchema: obj({ clipId: str, effectId: str, params: { type: "object" } }, ["clipId", "effectId", "params"]) }),
+  actionTool({ name: "update_video_effect", domain: "effect", actionType: "effect/update", title: "Update effect", description: "Update a video effect's params.", inputSchema: obj({ clipId: str, effectId: str, params: EFFECT_PARAMS_SCHEMA }, ["clipId", "effectId", "params"]) }),
   actionTool({ name: "toggle_video_effect", domain: "effect", actionType: "effect/toggle", title: "Toggle effect", description: "Enable/disable a video effect.", inputSchema: obj({ clipId: str, effectId: str, enabled: bool }, ["clipId", "effectId", "enabled"]) }),
-  actionTool({ name: "set_effect_order", domain: "effect", actionType: "effect/setOrder", title: "Reorder effects", description: "Set the full effect order for a clip.", inputSchema: obj({ clipId: str, effectIds: { type: "array" } }, ["clipId", "effectIds"]) }),
+  actionTool({ name: "set_effect_order", domain: "effect", actionType: "effect/setOrder", title: "Reorder effects", description: "Set the full effect order for a clip.", inputSchema: obj({ clipId: str, effectIds: EFFECT_ID_LIST_SCHEMA }, ["clipId", "effectIds"]) }),
 
   // color
-  actionTool({ name: "set_color_grading", domain: "color", actionType: "clip/setColorGrading", title: "Color grading", description: "Set a clip's color grading (wheels/curves/lut/hsl/temp/tint).", inputSchema: obj({ clipId: str, colorGrading: { type: "object" } }, ["clipId"]) }),
+  actionTool({ name: "set_color_grading", domain: "color", actionType: "clip/setColorGrading", title: "Color grading", description: "Set a clip's color grading (wheels/curves/lut/hsl/temp/tint).", inputSchema: obj({ clipId: str, colorGrading: COLOR_GRADING_SCHEMA }, ["clipId"]) }),
 
   // audio
   actionTool({ name: "set_clip_volume", domain: "audio", actionType: "audio/setVolume", title: "Set volume", description: "Set a clip's volume (0..1+).", inputSchema: obj({ clipId: str, volume: num }, ["clipId", "volume"]) }),
   actionTool({ name: "set_clip_fade", domain: "audio", actionType: "audio/setFade", title: "Set fade", description: "Set audio fade in/out seconds.", inputSchema: obj({ clipId: str, fadeIn: num, fadeOut: num }, ["clipId"]) }),
   actionTool({ name: "add_audio_automation", domain: "audio", actionType: "audio/addAutomation", title: "Audio automation", description: "Add audio automation points.", inputSchema: obj({ clipId: str, points: { type: "array" } }, ["clipId", "points"]) }),
-  actionTool({ name: "add_audio_effect", domain: "audio", actionType: "audio/addEffect", title: "Add audio effect", description: "Add an audio effect to a clip.", inputSchema: obj({ clipId: str, effect: { type: "object" } }, ["clipId", "effect"]) }),
+  actionTool({ name: "add_audio_effect", domain: "audio", actionType: "audio/addEffect", title: "Add audio effect", description: "Add an audio effect to a clip.", inputSchema: obj({ clipId: str, effect: AUDIO_EFFECT_SCHEMA }, ["clipId", "effect"]) }),
   actionTool({ name: "remove_audio_effect", domain: "audio", actionType: "audio/removeEffect", title: "Remove audio effect", description: "Remove an audio effect.", inputSchema: obj({ clipId: str, effectId: str }, ["clipId", "effectId"]) }),
-  actionTool({ name: "update_audio_effect", domain: "audio", actionType: "audio/updateEffect", title: "Update audio effect", description: "Update an audio effect's params.", inputSchema: obj({ clipId: str, effectId: str, params: { type: "object" } }, ["clipId", "effectId", "params"]) }),
+  actionTool({ name: "update_audio_effect", domain: "audio", actionType: "audio/updateEffect", title: "Update audio effect", description: "Update an audio effect's params.", inputSchema: obj({ clipId: str, effectId: str, params: EFFECT_PARAMS_SCHEMA }, ["clipId", "effectId", "params"]) }),
   actionTool({ name: "toggle_audio_effect", domain: "audio", actionType: "audio/toggleEffect", title: "Toggle audio effect", description: "Enable/disable an audio effect.", inputSchema: obj({ clipId: str, effectId: str, enabled: bool }, ["clipId", "effectId", "enabled"]) }),
 
   // subtitle
@@ -15612,12 +15808,12 @@ const TOOLS: RegisteredTool[] = [
   actionTool({ name: "remove_subtitle", domain: "subtitle", actionType: "subtitle/remove", title: "Remove subtitle", description: "Remove a subtitle.", inputSchema: obj({ subtitleId: str }, ["subtitleId"]), destructive: true }),
   actionTool({ name: "update_subtitle", domain: "subtitle", actionType: "subtitle/update", title: "Update subtitle", description: "Update a subtitle's text and/or timing (text, startTime, endTime seconds).", inputSchema: obj({ subtitleId: str, text: str, startTime: num, endTime: num }, ["subtitleId"]) }),
   actionTool({ name: "import_srt", domain: "subtitle", actionType: "subtitle/import", title: "Import SRT", description: "Import subtitles from SRT content.", inputSchema: obj({ srtContent: str }, ["srtContent"]) }),
-  actionTool({ name: "set_subtitle_style", domain: "subtitle", actionType: "subtitle/setStyle", title: "Subtitle style", description: "Set the global subtitle style.", inputSchema: obj({ style: { type: "object" } }, ["style"]) }),
+  actionTool({ name: "set_subtitle_style", domain: "subtitle", actionType: "subtitle/setStyle", title: "Subtitle style", description: "Set the global subtitle style.", inputSchema: obj({ style: SUBTITLE_STYLE_SCHEMA }, ["style"]) }),
 
   // keyframe
-  actionTool({ name: "add_keyframe", domain: "keyframe", actionType: "keyframe/add", title: "Add keyframe", description: "Add a keyframe for a clip property.", inputSchema: obj({ clipId: str, property: str, time: num, value: {} }, ["clipId", "property", "time"]) }),
+  actionTool({ name: "add_keyframe", domain: "keyframe", actionType: "keyframe/add", title: "Add keyframe", description: "Add a keyframe for a clip property.", inputSchema: obj({ clipId: str, property: str, time: num, value: KEYFRAME_VALUE_SCHEMA }, ["clipId", "property", "time"]) }),
   actionTool({ name: "remove_keyframe", domain: "keyframe", actionType: "keyframe/remove", title: "Remove keyframe", description: "Remove a keyframe.", inputSchema: obj({ clipId: str, property: str, time: num }, ["clipId", "property", "time"]) }),
-  actionTool({ name: "set_clip_keyframes", domain: "keyframe", actionType: "keyframe/setAll", title: "Set keyframes", description: "Replace all keyframes on a clip.", inputSchema: obj({ clipId: str, keyframes: { type: "array" } }, ["clipId", "keyframes"]) }),
+  actionTool({ name: "set_clip_keyframes", domain: "keyframe", actionType: "keyframe/setAll", title: "Set keyframes", description: "Replace all keyframes on a clip.", inputSchema: obj({ clipId: str, keyframes: KEYFRAME_ENTRIES_SCHEMA }, ["clipId", "keyframes"]) }),
 
   // transition
   actionTool({ name: "add_transition", domain: "transition", actionType: "transition/add", title: "Add transition", description: "Add a transition between two clips.", inputSchema: obj({ clipAId: str, clipBId: str, transitionType: str, duration: num }, ["clipAId", "clipBId", "transitionType", "duration"]) }),
@@ -15627,7 +15823,7 @@ const TOOLS: RegisteredTool[] = [
   // marker
   actionTool({ name: "add_marker", domain: "marker", actionType: "marker/add", title: "Add marker", description: "Add a timeline marker.", inputSchema: obj({ time: num, label: str, color: str }, ["time", "label", "color"]) }),
   actionTool({ name: "remove_marker", domain: "marker", actionType: "marker/remove", title: "Remove marker", description: "Remove a marker.", inputSchema: obj({ markerId: str }, ["markerId"]) }),
-  actionTool({ name: "update_marker", domain: "marker", actionType: "marker/update", title: "Update marker", description: "Update a marker.", inputSchema: obj({ markerId: str, updates: { type: "object" } }, ["markerId", "updates"]) }),
+  actionTool({ name: "update_marker", domain: "marker", actionType: "marker/update", title: "Update marker", description: "Update a marker.", inputSchema: obj({ markerId: str, updates: MARKER_UPDATES_SCHEMA }, ["markerId", "updates"]) }),
 
   // overlays (raw clip payloads)
   {
@@ -15635,7 +15831,7 @@ const TOOLS: RegisteredTool[] = [
     domain: "text",
     title: "Create text",
     description: "Create a text overlay that renders immediately. Pass { clip: { text, startTime, duration, style?, trackId? } }. A text track is created automatically if needed.",
-    inputSchema: obj({ clip: { type: "object" } }, ["clip"]),
+    inputSchema: obj({ clip: TEXT_CLIP_SCHEMA }, ["clip"]),
     readOnly: false,
     destructive: false,
     expensive: false,
@@ -15681,7 +15877,7 @@ const TOOLS: RegisteredTool[] = [
     domain: "text",
     title: "Update text",
     description: "Update a text overlay clip's content/style/animation/transform. Pass { clipId, updates: { text?, style?, animation?, transform? } }. Renders immediately.",
-    inputSchema: obj({ clipId: str, updates: { type: "object" } }, ["clipId", "updates"]),
+    inputSchema: obj({ clipId: str, updates: TEXT_CLIP_UPDATES_SCHEMA }, ["clipId", "updates"]),
     readOnly: false,
     destructive: false,
     expensive: false,
@@ -31531,7 +31727,7 @@ const TOOLS: RegisteredTool[] = [
       };
       const result = await host.applyAction(action);
       return result.success
-        ? ok(`executed ${action.type}`, { actionId: action.id })
+        ? ok(`executed ${action.type}`, result.data, { actionId: action.id })
         : fail(result.error?.message ?? "action failed", result.error?.code ?? "ACTION_FAILED");
     },
   },
@@ -31540,28 +31736,73 @@ const TOOLS: RegisteredTool[] = [
     domain: "raw",
     title: "Batch actions",
     description: "Dispatch a sequence of raw actions in order; stops on first failure.",
-    inputSchema: obj({ actions: { type: "array" } }, ["actions"]),
+    inputSchema: obj({ actions: { type: "array", items: { type: "object", properties: { type: { type: "string" }, params: { type: "object" } }, required: ["type"], additionalProperties: true } } }, ["actions"]),
     readOnly: false,
     destructive: true,
     expensive: false,
     handler: async (args, host) => {
       host.requireOpenProject();
       const list = (args.actions as Array<{ type: string; params?: Record<string, unknown> }>) ?? [];
-      let applied = 0;
-      for (const a of list) {
+      if (!Array.isArray(list) || list.length === 0) return fail("actions must contain at least one action", "INVALID_PARAMS");
+      const slots: unknown[] = [];
+      const grammar = /^\$(0|[1-9][0-9]*)\.id$/;
+      const walkPreflight = (value: unknown, index: number): ToolResult | undefined => {
+        if (typeof value === "string") {
+          if (value.startsWith("$$")) return;
+          if (value.startsWith("$") && (value.includes(".id") || /^\$[0-9]/.test(value))) {
+            const match = grammar.exec(value);
+            if (!match) return fail(`Invalid batch reference: ${value}`, "BATCH_REF_INVALID");
+            if (Number(match[1]) >= index) return fail(`Batch reference ${value} must point to an earlier action`, "BATCH_REF_INVALID");
+          }
+          return;
+        }
+        if (Array.isArray(value)) { for (const item of value) { const issue = walkPreflight(item, index); if (issue) return issue; } }
+        else if (value && typeof value === "object") { for (const item of Object.values(value)) { const issue = walkPreflight(item, index); if (issue) return issue; } }
+      };
+      for (let index = 0; index < list.length; index++) {
+        const a = list[index];
+        if (!a || typeof a.type !== "string" || !a.type.trim() || (a.params !== undefined && (!a.params || typeof a.params !== "object" || Array.isArray(a.params)))) {
+          return { ...fail(`Invalid action at index ${index}`, "INVALID_PARAMS"), data: [], meta: { batch: { applied: 0, failedIndex: index, revision: host.getProject().revision ?? 0 } } };
+        }
+        const issue = walkPreflight(a.params ?? {}, index);
+        if (issue) return { ...issue, data: [], meta: { batch: { applied: 0, failedIndex: index, revision: host.getProject().revision ?? 0 } } };
+      }
+      const resolve = (value: unknown): unknown => {
+        if (typeof value === "string") {
+          if (value.startsWith("$$")) return value.slice(1);
+          const match = grammar.exec(value);
+          if (!match) return value;
+          const slot = slots[Number(match[1])];
+          if (Array.isArray(slot)) throw Object.assign(new Error(`Reference ${value} is ambiguous because action returned multiple entities`), { code: "BATCH_REF_AMBIGUOUS" });
+          if (!slot || typeof slot !== "object" || typeof (slot as any).id !== "string" || (slot as any).entity === null) throw Object.assign(new Error(`Reference ${value} has no available entity`), { code: "BATCH_REF_UNAVAILABLE" });
+          return (slot as any).id;
+        }
+        if (Array.isArray(value)) return value.map(resolve);
+        if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolve(item)]));
+        return value;
+      };
+      for (let index = 0; index < list.length; index++) {
+        const a = list[index];
+        let params: Record<string, unknown>;
+        try { params = resolve(a.params ?? {}) as Record<string, unknown>; }
+        catch (error) {
+          const issue = fail(error instanceof Error ? error.message : "Batch reference unavailable", (error as any)?.code ?? "BATCH_REF_INVALID");
+          return { ...issue, data: slots, meta: { batch: { applied: index, failedIndex: index, failedType: a.type, revision: host.getProject().revision ?? 0 } } };
+        }
         const action: Action = {
           type: String(a.type),
           id: genId(),
           timestamp: Date.now(),
-          params: a.params ?? {},
+          params,
         };
         const result = await host.applyAction(action);
         if (!result.success) {
-          return fail(`batch failed at #${applied} (${a.type}): ${result.error?.message}`, "BATCH_FAILED");
+          const issue = fail(result.error?.message ?? `Action ${a.type} failed`, result.error?.code ?? "INTERNAL_ERROR");
+          return { ...issue, error: { ...issue.error!, ...(result.error?.hint ? { hint: result.error.hint } : {}), ...(result.error?.entityId ? { entityId: result.error.entityId } : {}) }, data: slots, meta: { batch: { applied: index, failedIndex: index, failedType: a.type, revision: host.getProject().revision ?? 0 } } };
         }
-        applied++;
+        slots.push(result.data);
       }
-      return ok(`applied ${applied} actions`);
+      return ok(`Applied ${list.length} actions`, slots, { batch: { applied: list.length, revision: host.getProject().revision ?? 0 } });
     },
   },
 
@@ -32074,7 +32315,12 @@ const TOOLS: RegisteredTool[] = [
 ];
 
 // ---- Registry --------------------------------------------------------------
-const REGISTRY = new Map<string, RegisteredTool>(TOOLS.map((t) => [t.name, t]));
+import { composeToolRegistry } from "./director/catalog";
+import { DIRECTOR_TOOL_MODULES } from "./director";
+
+const REGISTRY = new Map<string, RegisteredTool>(
+  composeToolRegistry(TOOLS, DIRECTOR_TOOL_MODULES).map((tool) => [tool.name, tool]),
+);
 
 export function getTool(name: string): RegisteredTool | undefined {
   return REGISTRY.get(name);

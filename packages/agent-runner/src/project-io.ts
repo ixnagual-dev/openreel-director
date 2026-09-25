@@ -41,6 +41,7 @@ export function createEmptyProject(
     name: name && name.length > 0 ? name : "Untitled",
     createdAt: now,
     modifiedAt: now,
+    revision: 0,
     settings: { ...DEFAULT_SETTINGS, ...settings },
     mediaLibrary: { items: [] },
     timeline: { tracks: [], subtitles: [], duration: 0, markers: [] },

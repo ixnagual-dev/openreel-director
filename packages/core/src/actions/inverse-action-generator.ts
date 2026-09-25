@@ -512,6 +512,19 @@ export class InverseActionGenerator {
           positions,
         });
       }
+      case "clip/closeGaps" as ClipAction["type"]: {
+        const params = action.params as { trackId: string };
+        const track = timeline.tracks.find((t) => t.id === params.trackId);
+        if (!track) return null;
+        const positions = track.clips.map((c) => ({
+          clipId: c.id,
+          startTime: c.startTime,
+        }));
+        return this.createInverseAction(action, "track/restorePositions", {
+          trackId: track.id,
+          positions,
+        });
+      }
     }
     return null;
   }

@@ -52,6 +52,9 @@ import { InverseActionGenerator } from "./inverse-action-generator";
 import { getActionHandler } from "./registry";
 import "./handlers";
 import { calculateProjectDuration } from "../timeline/project-duration";
+import { resolveClipFitMode } from "../media/import-roots";
+import { getProjectRevision, nextProjectRevision } from "../director/revision";
+import { allocateEntityId } from "./entity-id";
 
 interface MutableProjectItems {
   textClips?: TextClip[];
@@ -166,19 +169,27 @@ export class ActionExecutor {
       return {
         success: false,
         error: {
-          code: "INVALID_PARAMS",
+          code: (validationResult.errors[0]?.code as any) ?? "INVALID_PARAMS",
           message: validationResult.errors.map((e) => e.message).join("; "),
           details: { errors: validationResult.errors },
+          hint: validationResult.errors[0]?.message ?? "Correct the action parameters and retry.",
         },
       };
     }
     const projectSnapshot = JSON.parse(JSON.stringify(project));
+    this.lastAddedIds.clear();
+    const before = JSON.stringify(project);
     const inverseAction = this.inverseGenerator.generate(
       action,
       projectSnapshot,
     );
     try {
       await this.applyAction(action as TimelineAction, project);
+      if (JSON.stringify(project) === before) {
+        return { success: false, error: { code: "INVALID_PARAMS", message: "Action made no change", hint: "Choose values that change the current project state." } };
+      }
+      const mutableProject = project as Project & { revision?: number };
+      mutableProject.revision = nextProjectRevision(project);
       // Resolve generated-id markers while this action's newly-created entity is
       // still the latest one. Deferring resolution until undo makes every entry
       // in a grouped add operation target the final created entity instead.
@@ -190,6 +201,7 @@ export class ActionExecutor {
       return {
         success: true,
         actionId: action.id,
+        data: this.actionEntityReceipt(action, project),
       };
     } catch (error) {
       return {
@@ -198,9 +210,35 @@ export class ActionExecutor {
           code: "INVALID_PARAMS",
           message:
             error instanceof Error ? error.message : "Unknown error occurred",
+          hint: "Check the action parameters and referenced project entities, then retry.",
         },
       };
     }
+  }
+
+  private actionEntityReceipt(action: Action, project: Project): unknown {
+    const params = action.params;
+    const kindByAction: Record<string, string> = {
+      "track/add": "track", "track/duplicate": "track", "clip/add": "clip",
+      "clip/split": "clip", "subtitle/add": "subtitle", "transition/add": "transition",
+      "marker/add": "marker", "keyframe/add": "keyframe", "media/import": "media",
+      "clip/move": "clip", "clip/trim": "clip", "clip/remove": "clip",
+    };
+    const kind = kindByAction[action.type];
+    if (!kind) return undefined;
+    const id = this.lastAddedIds.get(kind) ?? (kind === "clip" ? String(params.clipId ?? "") : "");
+    if (!id) return undefined;
+    const timeline = project.timeline as any;
+    const entities: Record<string, unknown> = {
+      track: timeline.tracks?.find((item: any) => item.id === id),
+      clip: action.type === "clip/remove" ? null : timeline.tracks?.flatMap((track: any) => track.clips ?? []).find((item: any) => item.id === id),
+      subtitle: timeline.subtitles?.find((item: any) => item.id === id),
+      transition: timeline.tracks?.flatMap((track: any) => track.transitions ?? []).find((item: any) => item.id === id),
+      marker: timeline.markers?.find((item: any) => item.id === id),
+      media: project.mediaLibrary.items.find((item) => item.id === id),
+    };
+    const entity = entities[kind];
+    return entity ? { id, entity: structuredClone(entity), revision: getProjectRevision(project) } : undefined;
   }
 
   async executeMany(
@@ -439,7 +477,7 @@ export class ActionExecutor {
       case "media/import": {
         const params = action.params as { file: File };
         const newMediaItem = {
-          id: `media-${Date.now()}`,
+          id: allocateEntityId(action, "media", project),
           name: params.file.name,
           type: this.inferMediaType(params.file),
           fileHandle: null,
@@ -523,7 +561,7 @@ export class ActionExecutor {
               : track.type === params.trackType,
           ).length + 1;
         const newTrack: MutableTrack = {
-          id: params.trackId ?? `track-${crypto.randomUUID()}`,
+          id: params.trackId ?? allocateEntityId(action, "track", project),
           type: params.trackType as Track["type"],
           mode: params.mode,
           role: params.role,
@@ -810,6 +848,7 @@ export class ActionExecutor {
           audioEffects?: unknown[];
           keyframes?: unknown[];
           transform?: Record<string, unknown>;
+          fitMode?: unknown;
           fade?: { fadeIn: number; fadeOut: number };
           speed?: number;
           reversed?: boolean;
@@ -837,17 +876,23 @@ export class ActionExecutor {
             rotation: 0,
             anchor: { x: 0.5, y: 0.5 },
             opacity: 1,
-            fitMode: "contain" as const,
+            // WP1b §1.2: explicit fitMode arg > transform.fitMode >
+            // project defaultFitMode > "contain" (legacy look preserved).
+            fitMode: resolveClipFitMode(
+              params.fitMode,
+              (params.transform as { fitMode?: unknown } | undefined)?.fitMode,
+              (project.settings as { defaultFitMode?: unknown }).defaultFitMode,
+            ) as "contain",
           };
           const newClip = params.sourceClip
             ? {
                 ...structuredClone(params.sourceClip),
-                id: params.clipId ?? crypto.randomUUID(),
+                id: params.clipId ?? allocateEntityId(action, "clip", project),
                 trackId: params.trackId,
                 startTime: params.startTime,
               }
             : {
-                id: params.clipId ?? crypto.randomUUID(),
+                id: params.clipId ?? allocateEntityId(action, "clip", project),
                 mediaId: params.mediaId,
                 trackId: params.trackId,
                 startTime: params.startTime,
@@ -878,7 +923,17 @@ export class ActionExecutor {
       }
 
       case "clip/remove": {
-        const params = action.params as { clipId: string };
+        const params = action.params as { clipId: string; ripple?: "none" | "track" | "all" };
+        const removed = this.findClip(timeline, params.clipId);
+        if (removed && params.ripple && params.ripple !== "none") {
+          const end = removed.startTime + removed.duration;
+          const offset = params.ripple === "all" ? undefined : removed.trackId;
+          timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
+            ...track,
+            clips: track.clips.map((clip: MutableClip) => clip.startTime >= end && (!offset || clip.trackId === offset)
+              ? { ...clip, startTime: clip.startTime - removed.duration } : clip),
+          }));
+        }
         timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
           ...track,
           clips: track.clips.filter((c: MutableClip) => c.id !== params.clipId),
@@ -901,9 +956,19 @@ export class ActionExecutor {
           clipId: string;
           startTime: number;
           trackId?: string;
+          ripple?: "none" | "track" | "all";
         };
         const clip = this.findClip(timeline, params.clipId);
         if (clip) {
+          const delta = params.startTime - clip.startTime;
+          if (params.ripple && params.ripple !== "none" && delta !== 0) {
+            const rippleTrackId = params.ripple === "all" ? undefined : clip.trackId;
+            timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
+              ...track,
+              clips: track.clips.map((candidate: MutableClip) => candidate.id !== clip.id && candidate.startTime >= clip.startTime + clip.duration && (!rippleTrackId || candidate.trackId === rippleTrackId)
+                ? { ...candidate, startTime: candidate.startTime + delta } : candidate),
+            }));
+          }
           timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
             ...track,
             clips: track.clips.filter(
@@ -935,7 +1000,20 @@ export class ActionExecutor {
           clipId: string;
           inPoint?: number;
           outPoint?: number;
+          ripple?: "none" | "track" | "all";
         };
+        const trimmed = this.findClip(timeline, params.clipId);
+        if (trimmed && params.ripple && params.ripple !== "none") {
+          const previousEnd = trimmed.startTime + trimmed.duration;
+          const newDuration = (params.outPoint ?? trimmed.outPoint) - (params.inPoint ?? trimmed.inPoint);
+          const shift = newDuration - trimmed.duration;
+          const rippleTrackId = params.ripple === "all" ? undefined : trimmed.trackId;
+          timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
+            ...track,
+            clips: track.clips.map((candidate: MutableClip) => candidate.id !== trimmed.id && candidate.startTime >= previousEnd && (!rippleTrackId || candidate.trackId === rippleTrackId)
+              ? { ...candidate, startTime: Math.max(0, candidate.startTime + shift) } : candidate),
+          }));
+        }
         timeline.tracks = timeline.tracks.map((track: MutableTrack) => ({
           ...track,
           clips: track.clips.map((clip: MutableClip) => {
@@ -1274,6 +1352,42 @@ export class ActionExecutor {
                 });
               }
             }
+          }
+        }
+        break;
+      }
+
+      case "clip/closeGaps": {
+        // Close every positive gap on the track in one undo step. The
+        // first clip slides to 0 when it starts late; overlaps are left
+        // where they are (unlike track/consolidate).
+        const params = action.params as { trackId: string };
+        const track = timeline.tracks.find((t) => t.id === params.trackId);
+        if (track) {
+          const sorted = [...track.clips].sort(
+            (a, b) => a.startTime - b.startTime,
+          );
+          const newPositions = new Map<string, number>();
+          let cursor = 0;
+          for (const c of sorted) {
+            if (c.startTime > cursor) {
+              newPositions.set(c.id, cursor);
+              cursor += c.duration;
+            } else {
+              cursor = Math.max(cursor, c.startTime + c.duration);
+            }
+          }
+          if (newPositions.size > 0) {
+            timeline.tracks = timeline.tracks.map((t: MutableTrack) => {
+              if (t.id !== track.id) return t;
+              return {
+                ...t,
+                clips: t.clips.map((c: MutableClip) => {
+                  const ns = newPositions.get(c.id);
+                  return ns !== undefined ? { ...c, startTime: ns } : c;
+                }),
+              };
+            });
           }
         }
         break;
@@ -1665,12 +1779,22 @@ export class ActionExecutor {
         };
         const clipA = this.findClip(timeline, params.clipAId);
         if (clipA) {
+          const clipB = this.findClip(timeline, params.clipBId);
+          if (clipB) {
+            const gap = clipB.startTime - (clipA.startTime + clipA.duration);
+            if (Math.abs(gap) <= 2 / project.settings.frameRate) {
+              timeline.tracks = timeline.tracks.map((candidate: MutableTrack) => candidate.id !== clipB.trackId ? candidate : ({
+                ...candidate,
+                clips: candidate.clips.map((item: MutableClip) => item.id === clipB.id ? { ...item, startTime: clipA.startTime + clipA.duration } : item),
+              }));
+            }
+          }
           const track = timeline.tracks.find(
             (t: MutableTrack) => t.id === clipA.trackId,
           );
           if (track) {
             const newTransition: Transition = {
-              id: `transition-${Date.now()}`,
+              id: allocateEntityId(action, "transition", project),
               clipAId: params.clipAId,
               clipBId: params.clipBId,
               type: params.transitionType,
@@ -1965,7 +2089,7 @@ export class ActionExecutor {
           endTime: number;
         };
         const newSubtitle = {
-          id: `subtitle-${Date.now()}`,
+          id: allocateEntityId(action, "subtitle", project),
           text: params.text,
           startTime: params.startTime,
           endTime: params.endTime,

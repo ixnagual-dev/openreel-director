@@ -139,6 +139,19 @@ export class ActionValidator {
             message: "Params must be an object",
             path: "params",
           });
+        } else if (
+          action.type === "project/updateSettings" &&
+          "defaultFitMode" in action.params &&
+          (action.params as { defaultFitMode?: unknown }).defaultFitMode !== undefined &&
+          !["cover", "contain", "stretch"].includes(
+            String((action.params as { defaultFitMode?: unknown }).defaultFitMode),
+          )
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: 'defaultFitMode must be "cover", "contain", or "stretch"',
+            path: "params.defaultFitMode",
+          });
         }
         break;
 
@@ -548,6 +561,19 @@ export class ActionValidator {
             path: "params.startTime",
           });
         }
+        if (
+          "fitMode" in action.params &&
+          (action.params as { fitMode?: unknown }).fitMode !== undefined &&
+          !["cover", "contain", "stretch"].includes(
+            String((action.params as { fitMode?: unknown }).fitMode),
+          )
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: 'fitMode must be "cover", "contain", or "stretch"',
+            path: "params.fitMode",
+          });
+        }
         break;
 
       case "clip/remove":
@@ -576,6 +602,22 @@ export class ActionValidator {
               });
             }
           }
+        }
+        break;
+
+      case "clip/closeGaps":
+        if (!action.params.trackId || typeof action.params.trackId !== "string") {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "Track ID is required and must be a string",
+            path: "params.trackId",
+          });
+        } else if (!this.findTrack(timeline, action.params.trackId)) {
+          errors.push({
+            code: "NOT_FOUND",
+            message: `Track with ID ${action.params.trackId} not found`,
+            path: "params.trackId",
+          });
         }
         break;
 
@@ -1075,14 +1117,14 @@ export class ActionValidator {
             }
             const clipAEnd = clipA.startTime + clipA.duration;
             const clipBEnd = clipB.startTime + clipB.duration;
-            const tolerance = 0.001;
+            const tolerance = 2 / project.settings.frameRate;
 
-            const aBeforeB = Math.abs(clipAEnd - clipB.startTime) < tolerance;
-            const bBeforeA = Math.abs(clipBEnd - clipA.startTime) < tolerance;
+            const aBeforeB = Math.abs(clipAEnd - clipB.startTime) <= tolerance;
+            const bBeforeA = Math.abs(clipBEnd - clipA.startTime) <= tolerance;
 
             if (!aBeforeB && !bBeforeA) {
               errors.push({
-                code: "INVALID_PARAMS",
+                code: "INSUFFICIENT_HANDLES",
                 message: "Clips must be adjacent for transition",
                 path: "params",
               });

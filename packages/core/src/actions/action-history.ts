@@ -72,6 +72,7 @@ const ACTION_DESCRIPTIONS: Record<
   "media/import": () => "Import media",
   "media/delete": () => "Delete media",
   "clip/closeGapBefore": () => "Close gap",
+  "clip/closeGaps": () => "Close gaps",
   "track/consolidate": () => "Remove gaps",
   "track/restorePositions": () => "Restore positions",
 };

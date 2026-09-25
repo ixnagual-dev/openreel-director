@@ -39,6 +39,10 @@ export interface ImportedMediaRef {
   readonly durationSec: number;
   readonly width?: number;
   readonly height?: number;
+  /** Absolute real path when imported by reference (copy: false). */
+  readonly sourcePath?: string;
+  /** True when the bytes were copied into the project. */
+  readonly copied?: boolean;
 }
 
 export type RiggingBackendMode = "configured" | "bundled" | "system";
@@ -197,6 +201,26 @@ export interface CreateProjectOptions {
   readonly width?: number;
   readonly height?: number;
   readonly frameRate?: number;
+  /** Default fit for clips created without an explicit fitMode. */
+  readonly defaultFitMode?: "cover" | "contain" | "stretch";
+}
+
+export interface ImportMediaFromPathOptions {
+  readonly name?: string;
+  /** Reference in place (false, default) or copy bytes into the project. */
+  readonly copy?: boolean;
+}
+
+export interface ImportMediaFromFolderOptions {
+  readonly glob?: string;
+  readonly recursive?: boolean;
+  readonly copy?: boolean;
+}
+
+export interface ImportMediaFromFolderResult {
+  readonly imported: readonly ImportedMediaRef[];
+  readonly skipped: readonly { path: string; reason: string }[];
+  readonly truncated: boolean;
 }
 
 export type ExportMotionSceneFormat = "mp4" | "webm-alpha" | "mov-prores4444";
@@ -254,6 +278,29 @@ export interface EditingHost {
   listProjects?(): Promise<readonly ProjectRef[]>;
   saveProject?(): Promise<ProjectRef>;
   importMediaFromUrl?(url: string, options?: { name?: string }): Promise<ImportedMediaRef>;
+  /**
+   * Import a local file by absolute path. The host enforces the configured
+   * import roots (realpath containment). Optional because it needs a
+   * main-process file prober that only the desktop host provides.
+   */
+  importMediaFromPath?(
+    path: string,
+    options?: ImportMediaFromPathOptions,
+  ): Promise<ImportedMediaRef>;
+  /**
+   * Import a folder of media (suffix allow-list or glob). One bad file does
+   * not abort the folder; failures land in `skipped`.
+   */
+  importMediaFromFolder?(
+    dir: string,
+    options?: ImportMediaFromFolderOptions,
+  ): Promise<ImportMediaFromFolderResult>;
+  /**
+   * Update the sticky MCP tool profile on this host (mirrors the desktop
+   * main-process profile for in-app chat calls). Headless hosts store it
+   * locally.
+   */
+  setToolProfile?(profile: string): Promise<{ profile: string; toolCount: number }>;
   /**
    * Render a motion composition to a finished video file (mp4 / transparent
    * WebM / ProRes 4444 MOV). Optional because it needs the renderer-side motion

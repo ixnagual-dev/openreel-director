@@ -39,7 +39,7 @@ export async function executeTool(
     return {
       ok: false,
       summary: `Unknown tool: ${name}`,
-      error: { code: "UNKNOWN_TOOL", message: `No tool named '${name}'` },
+      error: { code: "UNKNOWN_TOOL", message: `No tool named '${name}'`, hint: "Use a registered tool name from the current tool catalog." },
     };
   }
   const resolved = resolveRefs(args ?? {}, host);
@@ -47,7 +47,8 @@ export async function executeTool(
     return await tool.handler(resolved, host);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Tool execution failed";
-    return { ok: false, summary: message, error: { code: "TOOL_ERROR", message } };
+    const typed = error as { code?: string; entityId?: string; hint?: string };
+    return { ok: false, summary: message, error: { code: typed.code ?? "INTERNAL_ERROR", message, hint: typed.hint ?? "Inspect the project state and supplied arguments, then retry.", ...(typed.entityId ? { entityId: typed.entityId } : {}) } };
   }
 }
 

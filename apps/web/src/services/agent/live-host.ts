@@ -206,7 +206,7 @@ export class LiveEditorHost implements EditingHost {
 
   requireOpenProject(): void {
     if (!useProjectStore.getState().hasOpenProject) {
-      throw new Error("No project is open");
+      throw Object.assign(new Error("No project is open"), { code: "NO_PROJECT", hint: "Open or create a project, then retry." });
     }
   }
 

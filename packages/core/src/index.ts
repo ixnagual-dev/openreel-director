@@ -19,6 +19,9 @@ export * from "./animation";
 export * from "./effects";
 export * from "./device";
 export * from "./multicam";
+export * from "./director/types";
+export * from "./director/revision";
+export * from "./director/config";
 export {
   ExportEngine,
   getExportEngine,
