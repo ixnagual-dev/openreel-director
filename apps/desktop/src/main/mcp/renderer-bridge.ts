@@ -46,8 +46,8 @@ export function installRendererBridge(): McpToolProvider {
   }
 
   return {
-    async listTools(): Promise<McpToolDef[]> {
-      const result = await bridge!.request("listTools", {}, 10_000);
+    async listTools(profile?: string): Promise<McpToolDef[]> {
+      const result = await bridge!.request("listTools", { profile }, 10_000);
       return (result as McpToolDef[]) ?? [];
     },
     async callTool(

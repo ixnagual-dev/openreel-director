@@ -32,6 +32,8 @@ export interface McpBridgeRequest {
   kind: "listTools" | "callTool";
   name?: string;
   args?: Record<string, unknown>;
+  /** Requested tool profile for listTools (editorial | motion | creation | all). */
+  profile?: string;
 }
 
 export interface McpBridgeResponse {

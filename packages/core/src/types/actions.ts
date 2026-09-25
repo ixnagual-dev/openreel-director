@@ -165,6 +165,11 @@ export type ClipAction =
         /** Pre-assigned ID keeps grouped placement deterministic on redo. */
         clipId?: string;
         duration?: number;
+        /**
+         * Object-fit for the new clip. Resolution order: this field, then
+         * transform.fitMode, then project.settings.defaultFitMode, else "contain".
+         */
+        fitMode?: "cover" | "contain" | "stretch";
       };
     }
   | { type: "clip/remove"; params: { clipId: string } }
@@ -219,6 +224,10 @@ export type ClipAction =
       params: { clipId: string; playheadTime: number; trimStart: boolean };
     }
   | { type: "clip/closeGapBefore"; params: { clipId: string } }
+  | {
+      type: "clip/closeGaps";
+      params: { trackId: string };
+    }
   | { type: "clip/setSpeed"; params: { clipId: string; speed: number } }
   | { type: "clip/setReverse"; params: { clipId: string; reversed: boolean } }
   | {

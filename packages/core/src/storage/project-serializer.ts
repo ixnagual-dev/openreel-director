@@ -256,7 +256,9 @@ export class ProjectSerializer {
 
     const processedItems: MediaItem[] = project.mediaLibrary.items.map(
       (item: MediaItem) => {
-        if (!item.blob) {
+        // Path-referenced imports carry a real asset on disk; they are not
+        // placeholders just because no blob is embedded.
+        if (!item.blob && !item.sourcePath) {
           return {
             ...item,
             isPlaceholder: true,
@@ -356,7 +358,7 @@ export class ProjectSerializer {
       );
 
       for (const item of project.mediaLibrary.items) {
-        if (!item.blob && !item.thumbnailUrl) {
+        if (!item.blob && !item.thumbnailUrl && !item.sourcePath) {
           result.missingAssets!.push(item.id);
         }
       }

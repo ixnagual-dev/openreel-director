@@ -21,6 +21,8 @@ export interface ProjectSettings {
   readonly frameRate: number;
   readonly sampleRate: number;
   readonly channels: number;
+  /** Default object-fit for newly added clips. Absent means "contain". */
+  readonly defaultFitMode?: "cover" | "contain" | "stretch";
 }
 
 export interface Project {
@@ -68,6 +70,13 @@ export interface MediaItem {
   readonly originalUrl?: string;
   /** File hint stored in JSON for cross-session/cross-machine asset matching */
   readonly sourceFile?: { name: string; size: number; lastModified: number; folder?: string };
+  /**
+   * How the media bytes are held. "blob" embeds bytes in the project;
+   * "path" references a file on disk (see sourcePath). Absent means "blob".
+   */
+  readonly storage?: "blob" | "path";
+  /** Absolute real path of the referenced file when storage === "path". */
+  readonly sourcePath?: string;
   /** True while a background KieAI generation task is in progress */
   readonly isPending?: boolean;
   /** True when polling exhausted all retries — shows manual retry button */

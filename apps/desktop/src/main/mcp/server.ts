@@ -5,8 +5,13 @@ import { request as httpRequest } from "node:http";
 import path from "node:path";
 import { startHttpServer, type RunningHttpServer } from "./http-server";
 import { installRendererBridge, teardownRendererBridge } from "./renderer-bridge";
-import type { McpToolProvider, ServerInfo } from "./core";
+import type { McpToolProvider, McpToolResult, ServerInfo } from "./core";
+import { isToolProfileName } from "./core";
 import { endpointFilePath, MCP_PROTOCOL_PATH, type McpEndpoint } from "../../shared/mcp";
+import {
+  loadMcpSettings,
+  resolveMcpPort,
+} from "./settings";
 
 export interface McpStatus {
   readonly running: boolean;
@@ -23,6 +28,8 @@ interface McpState {
   // reads the token live via getToken().
   tokenHolder: { value: string };
   provider: McpToolProvider;
+  /** Sticky tool profile; default "editorial" for external MCP. */
+  profileHolder: { value: string };
 }
 
 let state: McpState | null = null;
@@ -68,17 +75,74 @@ function removeEndpointFile(): void {
   }
 }
 
+/** Wrap the bridge provider so set_tool_profile updates the sticky profile. */
+function wrapProfileProvider(
+  inner: McpToolProvider,
+  profileHolder: { value: string },
+): McpToolProvider {
+  return {
+    listTools: (profile?: string) =>
+      inner.listTools(profile ?? profileHolder.value),
+    callTool: async (
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<McpToolResult> => {
+      const result = await inner.callTool(name, args);
+      if (
+        name === "set_tool_profile" &&
+        result.ok &&
+        isToolProfileName((args as { profile?: unknown }).profile)
+      ) {
+        profileHolder.value = (args as { profile: string }).profile;
+      }
+      return result;
+    },
+  };
+}
+
 export async function startMcpServer(): Promise<void> {
   if (state) return;
+  const settings = loadMcpSettings();
+  const configuredPort = resolveMcpPort(settings);
+  const extraHosts =
+    typeof settings["mcp.bind"] === "object"
+      ? [settings["mcp.bind"].extra]
+      : [];
   const tokenHolder = { value: generateToken() };
-  const provider = installRendererBridge();
-  const running = await startHttpServer({
-    getToken: () => tokenHolder.value,
-    provider,
-    serverInfo: serverInfo(),
-    port: Number(process.env.OPENREEL_MCP_PORT ?? 0),
-  });
-  state = { running, tokenHolder, provider };
+  const profileHolder = { value: "editorial" };
+  const provider = wrapProfileProvider(
+    installRendererBridge(),
+    profileHolder,
+  );
+  let running: RunningHttpServer;
+  try {
+    running = await startHttpServer({
+      getToken: () => tokenHolder.value,
+      getProfile: () => profileHolder.value,
+      provider,
+      serverInfo: serverInfo(),
+      port: configuredPort,
+      extraHosts,
+    });
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "EADDRINUSE" && configuredPort !== 0) {
+      running = await startHttpServer({
+        getToken: () => tokenHolder.value,
+        getProfile: () => profileHolder.value,
+        provider,
+        serverInfo: serverInfo(),
+        port: 0,
+        extraHosts,
+      });
+      console.error(
+        `[mcp] mcp port ${configuredPort} is taken; listening on ephemeral ${running.port}`,
+      );
+    } else {
+      throw error;
+    }
+  }
+  state = { running, tokenHolder, provider, profileHolder };
   writeEndpointFile({
     url: endpointUrl(running.port),
     port: running.port,

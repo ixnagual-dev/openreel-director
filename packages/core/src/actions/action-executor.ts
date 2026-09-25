@@ -810,6 +810,7 @@ export class ActionExecutor {
           audioEffects?: unknown[];
           keyframes?: unknown[];
           transform?: Record<string, unknown>;
+          fitMode?: string;
           fade?: { fadeIn: number; fadeOut: number };
           speed?: number;
           reversed?: boolean;
@@ -839,12 +840,39 @@ export class ActionExecutor {
             opacity: 1,
             fitMode: "contain" as const,
           };
+          // Fit-mode resolution: explicit fitMode arg, then transform.fitMode
+          // on the same action, then project.settings.defaultFitMode, else
+          // "contain" (existing look preserved for old projects).
+          const isFitMode = (v: unknown): v is "cover" | "contain" | "stretch" =>
+            v === "cover" || v === "contain" || v === "stretch";
+          const transformFit =
+            params.transform && isFitMode(params.transform["fitMode"])
+              ? params.transform["fitMode"]
+              : undefined;
+          const projectDefault =
+            project.settings.defaultFitMode &&
+            isFitMode(project.settings.defaultFitMode)
+              ? project.settings.defaultFitMode
+              : undefined;
+          const explicitFit = isFitMode(params.fitMode)
+            ? params.fitMode
+            : undefined;
+          const resolvedFit = explicitFit ?? transformFit ?? projectDefault ?? "contain";
           const newClip = params.sourceClip
             ? {
                 ...structuredClone(params.sourceClip),
                 id: params.clipId ?? crypto.randomUUID(),
                 trackId: params.trackId,
                 startTime: params.startTime,
+                // Duplicates keep their stored fit unless the caller says otherwise.
+                ...(explicitFit ?? transformFit
+                  ? {
+                      transform: {
+                        ...params.sourceClip.transform,
+                        fitMode: (explicitFit ?? transformFit) as string,
+                      },
+                    }
+                  : {}),
               }
             : {
                 id: params.clipId ?? crypto.randomUUID(),
@@ -857,8 +885,8 @@ export class ActionExecutor {
                 effects: (params.effects as never[]) ?? [],
                 audioEffects: (params.audioEffects as never[]) ?? [],
                 transform: params.transform
-                  ? { ...defaultTransform, ...params.transform }
-                  : defaultTransform,
+                  ? { ...defaultTransform, ...params.transform, fitMode: resolvedFit }
+                  : { ...defaultTransform, fitMode: resolvedFit },
                 volume: params.volume ?? 1,
                 keyframes: (params.keyframes as never[]) ?? [],
                 ...(params.fade ? { fade: params.fade } : {}),
@@ -1276,6 +1304,40 @@ export class ActionExecutor {
             }
           }
         }
+        break;
+      }
+
+      case "clip/closeGaps": {
+        // Close every positive gap on a track in one undo step, leaving
+        // overlaps where they are (unlike track/consolidate, which also
+        // pushes overlaps apart and packs from time 0 unconditionally).
+        const params = action.params as { trackId: string };
+        timeline.tracks = timeline.tracks.map((t: MutableTrack) => {
+          if (t.id !== params.trackId) return t;
+          const sorted = [...t.clips].sort(
+            (a, b) => a.startTime - b.startTime,
+          );
+          const newPositions = new Map<string, number>();
+          let shift = 0;
+          let prevEnd = 0;
+          for (const c of sorted) {
+            const shiftedStart = c.startTime - shift;
+            if (shiftedStart > prevEnd) {
+              shift += shiftedStart - prevEnd;
+            }
+            newPositions.set(c.id, c.startTime - shift);
+            prevEnd = c.startTime - shift + c.duration;
+          }
+          return {
+            ...t,
+            clips: t.clips.map((c: MutableClip) => {
+              const ns = newPositions.get(c.id);
+              return ns !== undefined && ns !== c.startTime
+                ? { ...c, startTime: ns }
+                : c;
+            }),
+          };
+        });
         break;
       }
 

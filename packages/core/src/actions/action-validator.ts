@@ -139,6 +139,21 @@ export class ActionValidator {
             message: "Params must be an object",
             path: "params",
           });
+        } else if (
+          action.type === "project/updateSettings" &&
+          (action.params as { defaultFitMode?: unknown }).defaultFitMode !==
+            undefined &&
+          !["cover", "contain", "stretch"].includes(
+            (action.params as { defaultFitMode?: unknown })
+              .defaultFitMode as string,
+          )
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message:
+              'defaultFitMode must be one of "cover", "contain", "stretch"',
+            path: "params.defaultFitMode",
+          });
         }
         break;
 
@@ -548,6 +563,18 @@ export class ActionValidator {
             path: "params.startTime",
           });
         }
+        if (
+          action.params.fitMode !== undefined &&
+          action.params.fitMode !== "cover" &&
+          action.params.fitMode !== "contain" &&
+          action.params.fitMode !== "stretch"
+        ) {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: 'Fit mode must be one of "cover", "contain", "stretch"',
+            path: "params.fitMode",
+          });
+        }
         break;
 
       case "clip/remove":
@@ -706,8 +733,25 @@ export class ActionValidator {
         }
         break;
 
-      case "clip/split":
-        if (!action.params.clipId || typeof action.params.clipId !== "string") {
+      case "clip/closeGaps": {
+        const trackId = (action.params as { trackId?: unknown }).trackId;
+        if (!trackId || typeof trackId !== "string") {
+          errors.push({
+            code: "INVALID_PARAMS",
+            message: "Track ID is required and must be a string",
+            path: "params.trackId",
+          });
+        } else if (!this.findTrack(timeline, trackId)) {
+          errors.push({
+            code: "TRACK_NOT_FOUND",
+            message: `Track with ID ${trackId} not found`,
+            path: "params.trackId",
+          });
+        }
+        break;
+      }
+
+      case "clip/split":        if (!action.params.clipId || typeof action.params.clipId !== "string") {
           errors.push({
             code: "INVALID_PARAMS",
             message: "Clip ID is required and must be a string",

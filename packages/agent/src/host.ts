@@ -39,7 +39,32 @@ export interface ImportedMediaRef {
   readonly durationSec: number;
   readonly width?: number;
   readonly height?: number;
+  /** Absolute real path when imported by reference (copy: false). */
+  readonly sourcePath?: string;
+  /** True when the file bytes were copied into the project. */
+  readonly copied?: boolean;
 }
+
+export interface ImportMediaFromPathOptions {
+  readonly name?: string;
+  /** Copy bytes into the project. Default false (reference in place). */
+  readonly copy?: boolean;
+}
+
+export interface ImportMediaFolderOptions {
+  readonly glob?: string;
+  readonly recursive?: boolean;
+  /** Copy bytes into the project. Default false (reference in place). */
+  readonly copy?: boolean;
+}
+
+export interface ImportMediaFolderResult {
+  readonly imported: readonly ImportedMediaRef[];
+  readonly skipped: ReadonlyArray<{ path: string; reason: string }>;
+  readonly truncated: boolean;
+}
+
+export type ToolProfile = "editorial" | "motion" | "creation" | "all";
 
 export type RiggingBackendMode = "configured" | "bundled" | "system";
 
@@ -197,6 +222,7 @@ export interface CreateProjectOptions {
   readonly width?: number;
   readonly height?: number;
   readonly frameRate?: number;
+  readonly defaultFitMode?: "cover" | "contain" | "stretch";
 }
 
 export type ExportMotionSceneFormat = "mp4" | "webm-alpha" | "mov-prores4444";
@@ -254,6 +280,26 @@ export interface EditingHost {
   listProjects?(): Promise<readonly ProjectRef[]>;
   saveProject?(): Promise<ProjectRef>;
   importMediaFromUrl?(url: string, options?: { name?: string }): Promise<ImportedMediaRef>;
+  /**
+   * Import a local file by absolute path. Allowed roots come from the
+   * `mcp.importRoots` setting (default `$HOME`); paths outside them are
+   * rejected with PATH_OUTSIDE_ROOTS. Referenced in place by default
+   * (`copy: false`).
+   */
+  importMediaFromPath?(
+    path: string,
+    options?: ImportMediaFromPathOptions,
+  ): Promise<ImportedMediaRef>;
+  /** Import a folder of media files; one bad file does not abort the rest. */
+  importMediaFromFolder?(
+    dir: string,
+    options?: ImportMediaFolderOptions,
+  ): Promise<ImportMediaFolderResult>;
+  /**
+   * Switch the sticky MCP tool profile. Updates the same catalog that
+   * `tools/list` serves; in-app chat routing is unchanged.
+   */
+  setToolProfile?(profile: ToolProfile): Promise<{ profile: ToolProfile; toolCount: number }>;
   /**
    * Render a motion composition to a finished video file (mp4 / transparent
    * WebM / ProRes 4444 MOV). Optional because it needs the renderer-side motion

@@ -15,7 +15,8 @@ function err(message: string, status = 0): FetchUrlResult {
   return { ok: false, status, statusText: message, contentType: "", body: new ArrayBuffer(0), error: message };
 }
 
-function isBlockedHost(hostname: string): boolean {
+export function isBlockedHost(hostname: string, allowPrivateFetch = false): boolean {
+  if (allowPrivateFetch) return false;
   if (process.env.OPENREEL_ALLOW_LOCAL_FETCH === "1") return false;
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
@@ -32,7 +33,10 @@ function isBlockedHost(hostname: string): boolean {
   return false;
 }
 
-export async function fetchUrl(args: { url: string; maxBytes?: number }): Promise<FetchUrlResult> {
+export async function fetchUrl(
+  args: { url: string; maxBytes?: number },
+  opts?: { allowPrivateFetch?: boolean },
+): Promise<FetchUrlResult> {
   const max = args.maxBytes ?? DEFAULT_MAX_BYTES;
 
   let parsed: URL;
@@ -44,7 +48,7 @@ export async function fetchUrl(args: { url: string; maxBytes?: number }): Promis
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return err(`Only http/https URLs are allowed (got ${parsed.protocol})`);
   }
-  if (isBlockedHost(parsed.hostname)) {
+  if (isBlockedHost(parsed.hostname, opts?.allowPrivateFetch ?? false)) {
     return err(`Refusing to fetch a private/loopback host (${parsed.hostname})`);
   }
 

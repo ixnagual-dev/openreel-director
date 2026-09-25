@@ -18,7 +18,7 @@ export interface McpToolResult {
 }
 
 export interface McpToolProvider {
-  listTools(): Promise<McpToolDef[]>;
+  listTools(profile?: string): Promise<McpToolDef[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<McpToolResult>;
 }
 
@@ -47,6 +47,25 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   "2025-03-26",
   "2025-06-18",
 ]);
+
+/** Tool profiles (mirrors packages/agent/src/tool-profiles.ts). */
+export const TOOL_PROFILE_NAMES = [
+  "editorial",
+  "motion",
+  "creation",
+  "all",
+] as const;
+
+export type ToolProfileName = (typeof TOOL_PROFILE_NAMES)[number];
+
+export function isToolProfileName(value: unknown): value is ToolProfileName {
+  return (
+    value === "editorial" ||
+    value === "motion" ||
+    value === "creation" ||
+    value === "all"
+  );
+}
 
 function isNotification(msg: JsonRpcMessage): boolean {
   return msg.id === undefined || msg.id === null;
@@ -107,6 +126,7 @@ export async function handleMcpMessage(
   message: JsonRpcMessage,
   provider: McpToolProvider,
   serverInfo: ServerInfo,
+  opts?: { profile?: string },
 ): Promise<JsonRpcResponse | null> {
   const id = message.id ?? null;
   const reply = (result: unknown): JsonRpcResponse => ({
@@ -142,7 +162,16 @@ export async function handleMcpMessage(
       case "ping":
         return reply({});
       case "tools/list": {
-        const tools = await provider.listTools();
+        const params = message.params ?? {};
+        const requested =
+          typeof params.profile === "string" ? params.profile : opts?.profile;
+        if (requested !== undefined && !isToolProfileName(requested)) {
+          return fail(
+            -32602,
+            `Unknown tool profile: ${requested}. Expected editorial, motion, creation, or all.`,
+          );
+        }
+        const tools = await provider.listTools(requested);
         return reply({ tools });
       }
       case "tools/call": {
